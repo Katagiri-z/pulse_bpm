@@ -1,2 +1,2 @@
 # pulse_bpm
-EOG_
+EOG_puls_and_personal_bpm
