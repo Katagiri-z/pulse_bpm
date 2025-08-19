@@ -33,7 +33,7 @@
         
         <header class="text-center mb-6">
             <h1 class="text-3xl md:text-4xl font-bold text-indigo-600 dark:text-indigo-400">同時計測アプリ</h1>
-            <p class="mt-2 text-lg text-gray-600 dark:text-gray-400">脈波とタップによるBPMを同時に計測します</p>
+            <p class="mt-2 text-lg text-gray-600 dark:text-gray-400">脈波とタップによるパーソナルBPMを同時に計測します</p>
         </header>
 
         <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-6 md:p-8">
@@ -120,7 +120,6 @@
         startTime: 0, 
         csvData: [],
         pulseAnalysisInterval: null,
-        dataLoggerInterval: null,
     };
     
     // --- DOM要素 ---
@@ -153,6 +152,7 @@
         updateMainUI(false);
         stopPulseWave();
         stopTapBpm();
+        generateCSVData(); // CSVデータを生成
     });
     
     downloadButton.addEventListener('click', () => {
@@ -161,9 +161,8 @@
 
     function initializeAll() {
         appState.startTime = 0;
-        appState.csvData = [['Time_sec', 'RawBrightness', 'Pulse_Event', 'RRI_sec', 'Pulse_CurrentBPM', 'Pulse_AverageBPM', 'Tap_Event', 'Tap_CurrentBPM', 'Tap_AverageBPM', 'Name']];
+        appState.csvData = [];
         if (appState.pulseAnalysisInterval) clearInterval(appState.pulseAnalysisInterval);
-        if (appState.dataLoggerInterval) clearInterval(appState.dataLoggerInterval);
         initializePulseWave();
         initializeTapBpm();
     }
@@ -172,12 +171,15 @@
         startButton.disabled = isMeasuring;
         usernameInput.disabled = isMeasuring;
         stopButton.disabled = !isMeasuring;
-        downloadButton.disabled = isMeasuring || appState.csvData.length <= 1;
+        downloadButton.disabled = isMeasuring;
         
         if(isMeasuring) {
             showStatus('最初のタップで計測が開始されます...');
         } else {
             statusEl.classList.add('hidden');
+            if (pulseState.rawTimestamps.length > 0 || tapState.taps.length > 0) {
+                downloadButton.disabled = false;
+            }
         }
     }
 
@@ -187,47 +189,6 @@
         statusEl.className = `text-center p-2 rounded-lg ${isError ? 'bg-red-100 dark:bg-red-800 text-red-800 dark:text-red-100' : 'bg-yellow-100 dark:bg-yellow-800 text-yellow-800 dark:text-yellow-100'}`;
     }
     
-    // =================================================
-    // ===== データロガー (10ms間隔) =====
-    // =================================================
-    function startDataLogger() {
-        if (appState.dataLoggerInterval) clearInterval(appState.dataLoggerInterval);
-        appState.dataLoggerInterval = setInterval(() => {
-            if (!appState.isMeasuring || appState.startTime === 0) return;
-
-            const elapsedTimeSec = ((performance.now() - appState.startTime) / 1000).toFixed(2);
-            const currentBrightness = pulseState.rawBrightness.length > 0 ? pulseState.rawBrightness[pulseState.rawBrightness.length - 1] : 0;
-            const invertedBrightness = 255 - currentBrightness;
-
-            const pulseEvent = pulseState.peakJustHappened ? 1 : 0;
-            const tapEvent = tapState.tapJustHappened ? 1 : 0;
-
-            const rriSec = pulseEvent ? (pulseState.latestRRI / 1000).toFixed(3) : 0;
-            const pulseInstantBpm = pulseEvent ? pulseState.latestInstantBpm.toFixed(1) : 0;
-            const pulseAverageBpm = pulseEvent ? pulseState.latestAverageBpm.toFixed(1) : 0;
-            
-            const tapCurrentBpm = tapEvent ? tapState.latestCurrentBpm.toFixed(1) : 0;
-            const tapAverageBpm = tapEvent ? tapState.latestAverageBpm.toFixed(1) : 0;
-
-            appState.csvData.push([
-                elapsedTimeSec,
-                invertedBrightness.toFixed(4),
-                pulseEvent,
-                rriSec,
-                pulseInstantBpm,
-                pulseAverageBpm,
-                tapEvent,
-                tapCurrentBpm,
-                tapAverageBpm,
-                appState.userName
-            ]);
-
-            if (pulseState.peakJustHappened) pulseState.peakJustHappened = false;
-            if (tapState.tapJustHappened) tapState.tapJustHappened = false;
-
-        }, 10);
-    }
-
     // =================================================
     // ===== カメラ計測 (Pulse Wave) のロジック =====
     // =================================================
@@ -248,16 +209,14 @@
         pulseState = {
             stream: null, track: null, animationFrameId: null,
             rawBrightness: [], rawTimestamps: [],
-            detectedPeaks: [],
-            latestInstantBpm: 0, latestAverageBpm: 0, latestRRI: 0,
-            peakJustHappened: false,
+            detectedPeaks: [], // Store {timestamp, value}
         };
         const waveformCtx = document.getElementById('waveformChart').getContext('2d');
         if (waveformChart) waveformChart.destroy();
         waveformChart = new Chart(waveformCtx, {
             type: 'line',
             data: { labels: [], datasets: [ { label: 'フィルター後の輝度変化', data: [], borderColor: 'rgb(79, 70, 229)', borderWidth: 2, pointRadius: 0, tension: 0.1 }, { type: 'scatter', label: '検出されたピーク', data: [], backgroundColor: 'rgba(255, 99, 132, 1)', radius: 5, } ] },
-            options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { x: { display: true, title: { display: true, text: '時間 (s)' } }, y: { title: { display: true, text: '輝度' } } } }
+            options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { x: { type: 'linear', display: true, title: { display: true, text: '時間 (s)' } }, y: { title: { display: true, text: '輝度' } } } }
         });
         pulseElements.resultContainer.classList.add('hidden');
         pulseElements.instantBpmValue.textContent = '-';
@@ -289,10 +248,8 @@
     async function stopPulseWave() {
         if (pulseState.animationFrameId) cancelAnimationFrame(pulseState.animationFrameId);
         if (appState.pulseAnalysisInterval) clearInterval(appState.pulseAnalysisInterval);
-        if (appState.dataLoggerInterval) clearInterval(appState.dataLoggerInterval);
         pulseState.animationFrameId = null;
         appState.pulseAnalysisInterval = null;
-        appState.dataLoggerInterval = null;
 
         if (pulseState.track && pulseState.track.readyState === 'live') {
             try {
@@ -305,9 +262,8 @@
         pulseElements.video.srcObject = null;
         pulseElements.video.classList.add('hidden');
         pulseElements.instruction.classList.remove('hidden');
-        if (pulseState.detectedPeaks.length > 4) {
-            analyzeFinalPulseData();
-        }
+        
+        // 最終解析はCSV生成時に行う
     }
 
     function measureLoop(currentTime) {
@@ -336,12 +292,12 @@
         for(let i = 0; i < filteredData.length; i++) {
             const timestamp = timestamps[startIndex + i];
             if (now - timestamp <= displayWindow) {
-                visibleWaveData.push({ x: ((timestamp - appState.startTime) / 1000).toFixed(2), y: filteredData[i] });
+                visibleWaveData.push({ x: ((timestamp - appState.startTime) / 1000), y: filteredData[i] });
             }
         }
         for(const peak of peakData) {
              if (now - peak.timestamp <= displayWindow) {
-                visiblePeakData.push({ x: ((peak.timestamp - appState.startTime) / 1000).toFixed(2), y: peak.value });
+                visiblePeakData.push({ x: ((peak.timestamp - appState.startTime) / 1000), y: peak.value });
             }
         }
         waveformChart.data.datasets[0].data = visibleWaveData;
@@ -350,9 +306,9 @@
     }
     
     function analyzePulseChunk() {
-        if (pulseState.rawBrightness.length < 256) return;
+        if (pulseState.rawBrightness.length < 256 || appState.startTime === 0) return;
         
-        const signalChunk = pulseState.rawBrightness.map(v => 255 - v); // 波形を反転
+        const signalChunk = pulseState.rawBrightness.map(v => 255 - v);
         const timeChunk = pulseState.rawTimestamps;
         const samplingRate = 1000 / ((timeChunk[timeChunk.length - 1] - timeChunk[0]) / (timeChunk.length - 1));
 
@@ -361,43 +317,27 @@
         
         updateWaveformChart(filteredSignal, peaksInfo, timeChunk);
 
-        if (peaksInfo.length === 0) return;
-
+        const allPeaks = [];
         peaksInfo.forEach(peak => {
-            if (pulseState.detectedPeaks.length === 0 || peak.timestamp > pulseState.detectedPeaks[pulseState.detectedPeaks.length - 1] + 200) {
-                pulseState.detectedPeaks.push(peak.timestamp);
-                pulseState.peakJustHappened = true;
+            if (allPeaks.length === 0 || peak.timestamp > allPeaks[allPeaks.length - 1] + 200) {
+                allPeaks.push(peak.timestamp);
             }
         });
         
-        if (pulseState.detectedPeaks.length >= 2) {
-            const lastInterval = pulseState.detectedPeaks[pulseState.detectedPeaks.length - 1] - pulseState.detectedPeaks[pulseState.detectedPeaks.length - 2];
-            pulseState.latestRRI = lastInterval;
-            pulseState.latestInstantBpm = 60000 / lastInterval;
-            pulseElements.instantBpmValue.textContent = pulseState.latestInstantBpm.toFixed(1);
-
-            const recentPeaks = pulseState.detectedPeaks.slice(-11);
+        if (allPeaks.length >= 2) {
+            const lastInterval = allPeaks[allPeaks.length - 1] - allPeaks[allPeaks.length - 2];
+            const instantBpm = 60000 / lastInterval;
+            
+            const recentPeaks = allPeaks.slice(-11);
+            let averageBpm = 0;
             if (recentPeaks.length > 1) {
                 const totalInterval = recentPeaks[recentPeaks.length - 1] - recentPeaks[0];
-                pulseState.latestAverageBpm = 60000 / (totalInterval / (recentPeaks.length - 1));
-                pulseElements.avgBpmValue.textContent = pulseState.latestAverageBpm.toFixed(1);
+                averageBpm = 60000 / (totalInterval / (recentPeaks.length - 1));
             }
+            pulseElements.instantBpmValue.textContent = instantBpm.toFixed(1);
+            pulseElements.avgBpmValue.textContent = averageBpm.toFixed(1);
             pulseElements.resultContainer.classList.remove('hidden');
         }
-    }
-
-    function analyzeFinalPulseData() {
-        const rrIntervals = [];
-        for (let i = 1; i < pulseState.detectedPeaks.length; i++) {
-            rrIntervals.push(pulseState.detectedPeaks[i] - pulseState.detectedPeaks[i - 1]);
-        }
-        if (rrIntervals.length < 4) {
-             showStatus('脈波のピーク検出数が少なく、最終SDNNが計算できませんでした。', true);
-             return;
-        }
-        const avgRR = rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length;
-        const sdnn = Math.sqrt(rrIntervals.map(x => Math.pow(x - avgRR, 2)).reduce((a, b) => a + b, 0) / rrIntervals.length);
-        pulseElements.sdnnValue.textContent = sdnn.toFixed(1) + ' ms';
     }
     
     function getAverageBrightness(data) {
@@ -429,11 +369,9 @@
         const mean = data.reduce((a, b) => a + b) / data.length;
         const stdDev = Math.sqrt(data.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / data.length);
         
-        // --- ピーク検出のしきい値を調整 ---
-        const heightThreshold = mean + stdDev * 0.25; // 高さのしきい値：平均より少し高いもののみ
-        const prominenceThreshold = stdDev * 0.5; // 突出度のしきい値：標準偏差の半分以上
-        
-        const minDistanceInIndices = samplingRate * 0.2; // 200ms (300 BPM)
+        const heightThreshold = mean + stdDev * 0.25;
+        const prominenceThreshold = stdDev * 0.5;
+        const minDistanceInIndices = samplingRate * 0.2;
 
         const localMaximaIndices = [];
         for (let i = 1; i < data.length - 1; i++) {
@@ -446,10 +384,7 @@
         let lastPeakIndex = -Infinity;
 
         for (const peakIndex of localMaximaIndices) {
-            // 高さの条件をチェック
-            if (data[peakIndex] < heightThreshold) {
-                continue;
-            }
+            if (data[peakIndex] < heightThreshold) continue;
 
             let leftMin = data[peakIndex];
             for (let i = peakIndex - 1; i >= 0; i--) {
@@ -511,7 +446,7 @@
     let tapState = {};
 
     function initializeTapBpm() {
-        tapState = { taps: [], latestCurrentBpm: 0, latestAverageBpm: 0, tapJustHappened: false };
+        tapState = { taps: [] };
         tapElements.mainDisplay.textContent = '0';
         tapElements.averageBpmDisplay.textContent = '--';
     }
@@ -538,26 +473,20 @@
         if (appState.startTime === 0) {
             appState.startTime = now;
             showStatus('計測中...');
-            startDataLogger();
         }
 
         tapState.taps.push(now);
         tapElements.mainDisplay.textContent = tapState.taps.length;
-
+        
         if (tapState.taps.length >= 2) {
-            const lastInterval = tapState.taps[tapState.taps.length - 1] - tapState.taps[tapState.taps.length - 2];
-            tapState.latestCurrentBpm = 60000 / lastInterval;
-            
             const recentTaps = tapState.taps.slice(-11);
             if(recentTaps.length > 1) {
                 const totalInterval = recentTaps[recentTaps.length-1] - recentTaps[0];
-                tapState.latestAverageBpm = 60000 / (totalInterval / (recentTaps.length - 1));
-                tapElements.averageBpmDisplay.textContent = Math.round(tapState.latestAverageBpm);
+                const averageBpm = 60000 / (totalInterval / (recentTaps.length - 1));
+                tapElements.averageBpmDisplay.textContent = Math.round(averageBpm);
             }
         }
         
-        tapState.tapJustHappened = true;
-
         if (tapState.taps.length >= 100) {
             showStatus('100回のタップに到達しました。計測を終了します。');
             setTimeout(() => stopButton.click(), 500);
@@ -565,8 +494,110 @@
     }
 
     // ===========================================
-    // ===== CSVダウンロード =====
+    // ===== CSV生成とダウンロード =====
     // ===========================================
+    function generateCSVData() {
+        if (appState.startTime === 0) return;
+
+        // 1. 全脈波データを解析して、全ピーク情報を取得
+        const samplingRate = 1000 / ((pulseState.rawTimestamps[pulseState.rawTimestamps.length - 1] - pulseState.rawTimestamps[0]) / (pulseState.rawTimestamps.length - 1));
+        const invertedSignal = pulseState.rawBrightness.map(v => 255 - v);
+        const filteredSignal = applyBandpassFilter(invertedSignal, samplingRate);
+        const allPeaksInfo = findPeaksWithProminence(filteredSignal, pulseState.rawTimestamps, samplingRate);
+
+        // 2. ピーク情報をタイムスタンプをキーにしたマップに変換
+        const peakMap = new Map();
+        const allPeakTimestamps = [];
+        if (allPeaksInfo.length > 1) {
+            for (let i = 0; i < allPeaksInfo.length; i++) {
+                const peak = allPeaksInfo[i];
+                allPeakTimestamps.push(peak.timestamp);
+                let rri = 0, instantBpm = 0, averageBpm = 0;
+                if (i > 0) {
+                    rri = peak.timestamp - allPeaksInfo[i-1].timestamp;
+                    instantBpm = 60000 / rri;
+                }
+                const recentPeaks = allPeaksInfo.slice(Math.max(0, i - 10), i + 1).map(p => p.timestamp);
+                if (recentPeaks.length > 1) {
+                    const totalInterval = recentPeaks[recentPeaks.length - 1] - recentPeaks[0];
+                    averageBpm = 60000 / (totalInterval / (recentPeaks.length - 1));
+                }
+                peakMap.set(peak.timestamp, { rri, instantBpm, averageBpm });
+            }
+        }
+        
+        // 3. タップ情報をタイムスタンプをキーにしたマップに変換
+        const tapMap = new Map();
+        if (tapState.taps.length > 1) {
+            for (let i = 0; i < tapState.taps.length; i++) {
+                let currentBpm = 0, averageBpm = 0;
+                if (i > 0) {
+                    currentBpm = 60000 / (tapState.taps[i] - tapState.taps[i-1]);
+                }
+                const recentTaps = tapState.taps.slice(Math.max(0, i - 10), i + 1);
+                if (recentTaps.length > 1) {
+                     const totalInterval = recentTaps[recentTaps.length - 1] - recentTaps[0];
+                    averageBpm = 60000 / (totalInterval / (recentTaps.length - 1));
+                }
+                tapMap.set(tapState.taps[i], { currentBpm, averageBpm });
+            }
+        }
+
+        // 4. 0.01秒間隔でタイムラインを生成し、データをマージ
+        const finalCsvData = [['Time_sec', 'RawBrightness', 'Pulse_Event', 'RRI_sec', 'Pulse_MomentBPM', 'Pulse_AverageBPM', 'Tap_Event', 'Tap_MomentBPM', 'Tap_AverageBPM', 'Name']];
+        const duration = pulseState.rawTimestamps[pulseState.rawTimestamps.length - 1] - appState.startTime;
+        let pIndex = 0; // pulse raw data index
+        let peakIndex = 0;
+        let tapIndex = 0;
+
+        for (let t = 0; t <= duration; t += 10) {
+            const currentTimestamp = appState.startTime + t;
+            
+            // Find corresponding raw brightness
+            while(pIndex < pulseState.rawTimestamps.length - 1 && pulseState.rawTimestamps[pIndex] < currentTimestamp) {
+                pIndex++;
+            }
+            const brightness = 255 - (pulseState.rawBrightness[pIndex] || 0);
+
+            let pulseEvent = 0, rri = 0, pulseInstant = 0, pulseAvg = 0;
+            if (peakIndex < allPeakTimestamps.length && currentTimestamp >= allPeakTimestamps[peakIndex]) {
+                const peakTime = allPeakTimestamps[peakIndex];
+                const data = peakMap.get(peakTime);
+                pulseEvent = 1;
+                rri = data.rri;
+                pulseInstant = data.instantBpm;
+                pulseAvg = data.averageBpm;
+                peakIndex++;
+            }
+
+            let tapEvent = 0, tapCurrent = 0, tapAvg = 0;
+             if (tapIndex < tapState.taps.length && currentTimestamp >= tapState.taps[tapIndex]) {
+                const tapTime = tapState.taps[tapIndex];
+                const data = tapMap.get(tapTime);
+                tapEvent = 1;
+                tapCurrent = data.currentBpm;
+                tapAvg = data.averageBpm;
+                tapIndex++;
+            }
+
+            finalCsvData.push([
+                (t/1000).toFixed(2),
+                brightness.toFixed(4),
+                pulseEvent,
+                (rri/1000).toFixed(3),
+                pulseInstant.toFixed(1),
+                pulseAvg.toFixed(1),
+                tapEvent,
+                tapCurrent.toFixed(1),
+                tapAvg.toFixed(1),
+                appState.userName
+            ]);
+        }
+        appState.csvData = finalCsvData;
+        showStatus("CSVデータの生成が完了しました。", false);
+    }
+
+
     function downloadCombinedCSV() {
         if (appState.csvData.length <= 1) {
             showMessage("保存するデータがありません。", 3000);
